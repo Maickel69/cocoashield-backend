@@ -10,7 +10,12 @@ import http from 'http';
 import { createRequire } from 'module';
 import { getCasesFromDb, saveCaseToDb } from './dbClient.js';
 const require = createRequire(import.meta.url);
-const mkcert = require('mkcert');
+let mkcert = null;
+try {
+  mkcert = require('mkcert');
+} catch (e) {
+  console.log('[TLS] mkcert no está disponible (modo producción nube)');
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -80,6 +85,7 @@ if (fs.existsSync(MOBILE_DIST_PATH)) {
 // ─── Generate or load self-signed TLS certificate (async) ───────────────
 let tlsOptions = null;
 const initTls = async () => {
+  if (!mkcert) return;
   if (fs.existsSync(CERT_PATH) && fs.existsSync(KEY_PATH)) {
     tlsOptions = { key: fs.readFileSync(KEY_PATH), cert: fs.readFileSync(CERT_PATH) };
     console.log('[TLS] Certificado TLS cargado desde disco.');
