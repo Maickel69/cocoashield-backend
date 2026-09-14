@@ -8,6 +8,7 @@ import { exec } from 'child_process';
 import https from 'https';
 import http from 'http';
 import { createRequire } from 'module';
+import { getCasesFromDb, saveCaseToDb } from './dbClient.js';
 const require = createRequire(import.meta.url);
 const mkcert = require('mkcert');
 
@@ -229,8 +230,8 @@ const broadcastUpdate = (data) => {
 };
 
 // API Endpoint: Get all cases
-app.get('/api/cases', (req, res) => {
-  const cases = readDb();
+app.get('/api/cases', async (req, res) => {
+  const cases = await getCasesFromDb();
   res.json(cases);
 });
 
