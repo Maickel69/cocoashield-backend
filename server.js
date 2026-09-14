@@ -272,8 +272,11 @@ app.post('/api/predict', (req, res) => {
   }
 
   // Forward image to Cloud AI Microservice via HTTP (No local Python process execution)
-  const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://127.0.0.1:8000/predict';
-  console.log(`[Predict] Encaminando imagen al Microservicio de IA Cloud: ${AI_SERVICE_URL}`);
+  let aiEndpoint = process.env.AI_SERVICE_URL || 'http://127.0.0.1:8000/predict';
+  if (!aiEndpoint.endsWith('/predict')) {
+    aiEndpoint = aiEndpoint.replace(/\/$/, '') + '/predict';
+  }
+  console.log(`[Predict] Encaminando imagen al Microservicio de IA Cloud: ${aiEndpoint}`);
 
   (async () => {
     try {
@@ -282,7 +285,7 @@ app.post('/api/predict', (req, res) => {
       const formData = new FormData();
       formData.append('file', blob, tempFileName);
 
-      const aiResponse = await fetch(AI_SERVICE_URL, {
+      const aiResponse = await fetch(aiEndpoint, {
         method: 'POST',
         body: formData
       });
