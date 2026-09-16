@@ -284,6 +284,9 @@ app.post('/api/predict', (req, res) => {
       const blob = new Blob([dataBuffer], { type: `image/${ext}` });
       const formData = new FormData();
       formData.append('file', blob, tempFileName);
+      if (req.body.geminiKey) {
+        formData.append('gemini_key', req.body.geminiKey);
+      }
 
       const aiResponse = await fetch(aiEndpoint, {
         method: 'POST',
