@@ -1,25 +1,27 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import pkg from 'pg';
-const { Pool } = pkg;
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DB_PATH = path.join(__dirname, 'db.json');
+const SEED_PATH = path.join(__dirname, 'seedCases.json');
 
 const connectionString = process.env.DATABASE_URL || process.env.SUPABASE_DATABASE_URL;
 
 let pool = null;
 if (connectionString) {
   try {
-    pool = new Pool({
-      connectionString,
-      ssl: { rejectUnauthorized: false }
-    });
-    console.log('[Supabase DB] ✅ Conector PostgreSQL activo');
+    const pkg = await import('pg');
+    const Pool = pkg.default?.Pool || pkg.Pool;
+    if (Pool) {
+      pool = new Pool({
+        connectionString,
+        ssl: { rejectUnauthorized: false }
+      });
+      console.log('[Supabase DB] ✅ Conector PostgreSQL activo');
+    }
   } catch (err) {
-    console.error('[Supabase DB] ⚠️ Error inicializando pool Postgres:', err.message);
+    console.log('[Supabase DB] Conector PostgreSQL opcional no disponible:', err.message);
   }
 }
 
@@ -41,7 +43,13 @@ export const getCasesFromDb = async () => {
         FROM casos_epidemiologicos
         ORDER BY created_at DESC
       `);
-      return res.rows;
+      if (res.rows && res.rows.length > 0) {
+        return res.rows.map(r => ({
+          ...r,
+          image: r.image || r.photo || '',
+          photo: r.image || r.photo || ''
+        }));
+      }
     } catch (err) {
       console.error('[Supabase DB] Error leyendo casos:', err.message);
     }
@@ -49,15 +57,42 @@ export const getCasesFromDb = async () => {
 
   // Fallback a db.json local
   try {
-    if (!fs.existsSync(DB_PATH)) return [];
-    return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-  } catch {
-    return [];
+    if (fs.existsSync(DB_PATH)) {
+      const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+      if (Array.isArray(data) && data.length > 0) {
+        return data.map(r => ({
+          ...r,
+          image: r.image || r.photo || '',
+          photo: r.image || r.photo || ''
+        }));
+      }
+    }
+  } catch (err) {
+    console.error('[DB Local] Error leyendo db.json:', err.message);
   }
+
+  // Fallback a seedCases.json
+  try {
+    if (fs.existsSync(SEED_PATH)) {
+      const seeds = JSON.parse(fs.readFileSync(SEED_PATH, 'utf8'));
+      fs.writeFileSync(DB_PATH, JSON.stringify(seeds, null, 2), 'utf8');
+      return seeds;
+    }
+  } catch (err) {
+    console.error('[DB Seed] Error leyendo seedCases.json:', err.message);
+  }
+
+  return [];
 };
 
 // ─── Insertar Caso ──────────────────────────────────────────────────────────
 export const saveCaseToDb = async (caseObj) => {
+  const normalized = {
+    ...caseObj,
+    image: caseObj.image || caseObj.photo || '',
+    photo: caseObj.image || caseObj.photo || ''
+  };
+
   if (pool) {
     try {
       const query = `
@@ -68,31 +103,35 @@ export const saveCaseToDb = async (caseObj) => {
         RETURNING *
       `;
       const values = [
-        caseObj.diagnosis || 'Sano',
-        caseObj.scientificName || 'Theobroma cacao',
-        caseObj.confidence || 95.0,
-        caseObj.severity || 'Media',
-        caseObj.image || '',
-        caseObj.lat || -1.0234,
-        caseObj.lng || -77.5432,
-        caseObj.prescription || '',
-        caseObj.model || 'Cloud AI ResNet-50'
+        normalized.diagnosis || 'Sano',
+        normalized.scientificName || 'Theobroma cacao',
+        normalized.confidence || 95.0,
+        normalized.severity || 'Media',
+        normalized.image || '',
+        normalized.lat || -1.0234,
+        normalized.lng || -77.5432,
+        normalized.prescription || '',
+        normalized.model || 'Direct Gemini-1.5-Flash Vision'
       ];
-      const res = await pool.query(query, values);
-      return res.rows[0];
+      await pool.query(query, values);
     } catch (err) {
       console.error('[Supabase DB] Error guardando caso en Postgres:', err.message);
     }
   }
 
-  // Fallback a db.json
+  // Fallback / persistencia en db.json
   try {
-    const current = fs.existsSync(DB_PATH) ? JSON.parse(fs.readFileSync(DB_PATH, 'utf8')) : [];
-    const updated = [caseObj, ...current];
+    let current = [];
+    if (fs.existsSync(DB_PATH)) {
+      current = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
+    } else if (fs.existsSync(SEED_PATH)) {
+      current = JSON.parse(fs.readFileSync(SEED_PATH, 'utf8'));
+    }
+    const updated = [normalized, ...current.filter(c => c.id !== normalized.id)];
     fs.writeFileSync(DB_PATH, JSON.stringify(updated, null, 2), 'utf8');
-    return caseObj;
+    return normalized;
   } catch (err) {
     console.error('[DB Local] Error guardando en db.json:', err.message);
-    return null;
+    return normalized;
   }
 };

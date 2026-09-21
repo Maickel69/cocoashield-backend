@@ -2,4 +2,3 @@ node_modules/
 .env
 cert.pem
 key.pem
-db.json
