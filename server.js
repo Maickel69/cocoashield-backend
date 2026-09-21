@@ -460,12 +460,14 @@ app.post('/api/predict', (req, res) => {
       svgY: finalSvgY,
       severity: result.diagnosis === 'Sano' ? 'ninguna' : (result.confidence > 90 ? 'alta' : 'media'),
       prescription: '',
-      image: image
+      image: image,
+      photo: image
     };
 
     const updatedCases = [finalCase, ...cases];
     if (writeDb(updatedCases)) {
       console.log(`[API] Caso Diagnosticado y Registrado: ${newId} (${result.diagnosis})`);
+      saveCaseToDb(finalCase).catch(e => console.error('[DB Sync] Error:', e.message));
       
       broadcastUpdate({ type: 'ADD_CASE', caseData: finalCase });
       
@@ -489,6 +491,10 @@ app.post('/api/cases', (req, res) => {
     return res.status(400).json({ error: 'Invalid case data' });
   }
 
+  // Normalizar imagen y foto para que ambos existan
+  if (newCase.photo && !newCase.image) newCase.image = newCase.photo;
+  if (newCase.image && !newCase.photo) newCase.photo = newCase.image;
+
   const cases = readDb();
   
   // Check for duplicates
@@ -500,6 +506,7 @@ app.post('/api/cases', (req, res) => {
   const updatedCases = [newCase, ...cases];
   if (writeDb(updatedCases)) {
     console.log(`[API] Synced new case: ${newCase.id} (${newCase.diagnosis})`);
+    saveCaseToDb(newCase).catch(e => console.error('[DB Sync] Error:', e.message));
     
     // Broadcast the new case to all SSE dashboards
     broadcastUpdate({ type: 'ADD_CASE', caseData: newCase });
