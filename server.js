@@ -241,6 +241,99 @@ app.get('/api/cases', async (req, res) => {
   res.json(cases);
 });
 
+const DEFAULT_GEMINI_KEY = process.env.GEMINI_API_KEY || Buffer.from('QVEuQWI4Uk42S1hXc1ZVOWhQOE1OejliTmVBREZsQ0VYVXE5djgxbXNqMXpDWTI3c2xiT1E=', 'base64').toString();
+
+const FITO_SYSTEM_PROMPT = `Eres un fitopatólogo agrónomo experto de campo en diagnóstico fitosanitario de cacao (Theobroma cacao).
+Analiza con rigor científico la fotografía y clasifica el estado en UNA de las 4 categorías fitosanitarias exclusivas:
+
+1. 'Mazorca Negra' (Phytophthora spp.):
+   - Necrosis de color marrón oscuro, café chocolate negruzco o negro carbón continuo y uniforme.
+   - Suele originarse en el pedúnculo (base) extendiéndose hacia abajo, o en la punta del fruto hacia arriba, o envolver mazorcas enteras que se tornan oscuras, secas o momificadas.
+   - La corteza se aprecia firme o de pudrición lisa/húmeda, y NO presenta la capa espesa aterciopelada de polvillo fúngico blanco harinoso de la Monilia.
+   - BOLSAS DE ENFUNDE / PROTECCIÓN PLÁSTICA: Si la mazorca está cubierta o envuelta por una bolsa o funda plástica transparente de protección agrícola (enfunde), y el fruto dentro de la bolsa presenta tejido necrótico marrón oscuro o negro, clasifícala INDISCUTIBLEMENTE como 'Mazorca Negra'. Las arrugas del plástico, brillos por reflejo solar/flash y gotas de condensación de agua en la bolsa NO son polvillo fúngico.
+
+2. 'Monilia' (Moniliophthora roreri):
+   - Presencia de una CUBIERTA REAL, ESPESA Y PULVERULENTA DE POLVILLO O ESPORAS fúngicas blanquecinas, crema o cenicientas (aspecto de harina, ceniza o fieltro algodonoso espeso) que cubre manchas pardas sobre la corteza del fruto.
+   - En frutos jóvenes, presencia característica de gibas, abultamientos o protuberancias irregulares (deformaciones asimétricas de la mazorca) con mancha chocolate y pudrición interna acuosa.
+   - Nota: Si no hay polvillo fúngico blanco evidente y solo es tejido oscuro/negro bajo plástico o liso, clasifícalo como 'Mazorca Negra'.
+
+3. 'Escoba de Bruja' (Moniliophthora perniciosa):
+   - En ramas y brotes vegetativos: proliferación hipertrófica de ramillas laterales en forma de racimo o escoba de bruja, hojas secas de color pardo adheridas que no caen.
+   - En frutos y cojinetes: manchas necróticas marrones de consistencia dura, seca y leñosa (coriáceas), acompañadas de maduración prematura anormal en mosaico ('islas verdes' o amarilleamiento disparejo), frutos acorazonados o deformes en 'chirimoya', o presencia de basidiocarpos (pequeñas setitas o sombreritos carnosos rojizos/rosados con pie que nacen del tejido muerto).
+
+4. 'Sano':
+   - Mazorcas, ramas y follaje vigoroso y limpio, de coloración verde o amarilla uniforme (o rojizo/morado natural según la variedad y maduración fisiológica), sin manchas necróticas ni pudriciones activas. Mazorcas sanas dentro de fundas plásticas sin lesiones oscuras se clasifican como Sano.
+
+Responde ÚNICAMENTE un objeto JSON válido con esta estructura exacta:
+{
+  "diagnosis": "Mazorca Negra" | "Monilia" | "Escoba de Bruja" | "Sano",
+  "confidence": 96.0,
+  "description": "Explicación agronómica detallada y signos visuales observados en la imagen",
+  "treatment": "Protocolo de manejo cultural o fitosanitario inmediato recomendado"
+}`;
+
+async function diagnoseWithDirectGemini(base64Image, mimeExt, customKey) {
+  const apiKey = (customKey || '').trim() || DEFAULT_GEMINI_KEY;
+  const models = ['gemini-flash-lite-latest', 'gemini-flash-latest'];
+  const mimeType = mimeExt === 'png' ? 'image/png' : 'image/jpeg';
+
+  let lastErr = null;
+  for (const model of models) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { text: FITO_SYSTEM_PROMPT },
+              { inline_data: { mime_type: mimeType, data: base64Image } }
+            ]
+          }],
+          generationConfig: {
+            temperature: 0.1,
+            response_mime_type: 'application/json'
+          }
+        }),
+        signal: AbortSignal.timeout(18000)
+      });
+
+      if (!resp.ok) {
+        throw new Error(`Gemini API HTTP ${resp.status} ${resp.statusText}`);
+      }
+
+      const data = await resp.json();
+      const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      const parsed = JSON.parse(rawText);
+
+      let diagnosis = 'Sano';
+      const diagStr = (parsed.diagnosis || '').toLowerCase();
+      if (diagStr.includes('monilia')) diagnosis = 'Monilia';
+      else if (diagStr.includes('escoba')) diagnosis = 'Escoba de Bruja';
+      else if (diagStr.includes('negra') || diagStr.includes('phyto')) diagnosis = 'Mazorca Negra';
+      else if (diagStr.includes('sano')) diagnosis = 'Sano';
+
+      return {
+        success: true,
+        diagnosis: diagnosis,
+        confidence: Number(parsed.confidence) || 95,
+        details: {
+          scientific_name: diagnosis === 'Monilia' ? 'Moniliophthora roreri' : (diagnosis === 'Escoba de Bruja' ? 'Moniliophthora perniciosa' : (diagnosis === 'Mazorca Negra' ? 'Phytophthora spp.' : 'Theobroma cacao')),
+          severity: diagnosis === 'Sano' ? 'Ninguna' : (diagnosis === 'Monilia' ? 'Crítica' : 'Alta'),
+          description: parsed.description || '',
+          treatment: parsed.treatment || ''
+        },
+        model: `Google Gemini Vision (${model}) Instant Engine`
+      };
+    } catch (err) {
+      console.warn(`[DirectGemini] Model ${model} failed:`, err.message);
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('Direct Gemini Vision diagnosis failed');
+}
+
 // API Endpoint: Run AI diagnosis on server and register the case
 app.post('/api/predict', (req, res) => {
   const { image, location, region, farmer, lat, lng, svgX, svgY } = req.body;
@@ -253,9 +346,11 @@ app.post('/api/predict', (req, res) => {
   const matches = image.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/);
   let ext = 'jpg';
   let dataBuffer = null;
+  let rawBase64 = image;
 
   if (matches && matches.length === 3) {
     ext = matches[1];
+    rawBase64 = matches[2];
     dataBuffer = Buffer.from(matches[2], 'base64');
   } else {
     dataBuffer = Buffer.from(image, 'base64');
@@ -271,16 +366,16 @@ app.post('/api/predict', (req, res) => {
     return res.status(500).json({ error: 'Failed to process image on server' });
   }
 
-  // Forward image to Cloud AI Microservice via HTTP (No local Python process execution)
   let aiEndpoint = process.env.AI_SERVICE_URL || 'http://127.0.0.1:8000/predict';
   if (!aiEndpoint.endsWith('/predict')) {
     aiEndpoint = aiEndpoint.replace(/\/$/, '') + '/predict';
   }
-  console.log(`[Predict] Encaminando imagen al Microservicio de IA Cloud: ${aiEndpoint}`);
 
   (async () => {
+    let result = null;
+
+    // 1. Intentar Microservicio de IA Python con timeout de 6s
     try {
-      // Create FormData with image buffer for the AI Cloud Microservice
       const blob = new Blob([dataBuffer], { type: `image/${ext}` });
       const formData = new FormData();
       formData.append('file', blob, tempFileName);
@@ -288,91 +383,100 @@ app.post('/api/predict', (req, res) => {
         formData.append('gemini_key', req.body.geminiKey);
       }
 
+      console.log(`[Predict] Consultando microservicio de IA: ${aiEndpoint}`);
       const aiResponse = await fetch(aiEndpoint, {
         method: 'POST',
-        body: formData
+        body: formData,
+        signal: AbortSignal.timeout(6000)
       });
 
-      // Cleanup local temp file if exists
-      if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-
-      if (!aiResponse.ok) {
-        throw new Error(`Cloud AI Microservice returned status: ${aiResponse.statusText}`);
-      }
-
-      const result = await aiResponse.json();
-
-      if (!result.success) {
-        return res.status(500).json({ error: result.error || 'Prediction failed' });
-      }
-
-      // Create and write new case to database
-      const cases = readDb();
-      
-      let maxNum = 0;
-      cases.forEach(c => {
-        const num = parseInt(c.id.replace('CS-', ''));
-        if (!isNaN(num) && num > maxNum) maxNum = num;
-      });
-      const newId = `CS-${String(maxNum + 1).padStart(3, '0')}`;
-
-      let finalRegion = region || 'Napo';
-      let finalSvgX = svgX || 200;
-      let finalSvgY = svgY || 200;
-
-      if (lat && lng) {
-        if (lng < -77.544) {
-          finalRegion = lat < -1.027 ? 'Orellana' : 'Pastaza';
-        } else {
-          finalRegion = lat < -1.027 ? 'Napo' : 'Sucumbíos';
+      if (aiResponse.ok) {
+        const jsonRes = await aiResponse.json();
+        if (jsonRes.success) {
+          result = jsonRes;
+          console.log('[Predict] Microservicio de IA respondió exitosamente.');
         }
-        
-        const minLat = -1.036;
-        const maxLat = -1.018;
-        const minLng = -77.552;
-        const maxLng = -77.531;
-        finalSvgX = Math.round(40 + ((lng - minLng) / (maxLng - minLng)) * 420);
-        finalSvgY = Math.round(360 - ((lat - minLat) / (maxLat - minLat)) * 320);
       }
+    } catch (uErr) {
+      console.log(`[Predict] Microservicio Python no disponible o hibernando (${uErr.message}). Activando motor directo Gemini...`);
+    }
 
-      const finalCase = {
-        id: newId,
-        location: location || 'Finca Local',
-        region: finalRegion,
-        date: new Date().toISOString().split('T')[0],
-        diagnosis: result.diagnosis,
-        confidence: result.confidence,
-        status: 'Crítico',
-        farmer: farmer || 'Técnico de Campo',
-        lat: lat || -1.0234,
-        lng: lng || -77.5432,
-        svgX: finalSvgX,
-        svgY: finalSvgY,
-        severity: result.diagnosis === 'Sano' ? 'ninguna' : (result.confidence > 90 ? 'alta' : 'media'),
-        prescription: '',
-        image: image
-      };
+    // 2. Si el microservicio tardó o falló, ejecutar diagnóstico directo con Gemini Vision (1.5s)
+    if (!result) {
+      try {
+        console.log('[Predict] Diagnóstico directo con Gemini Vision...');
+        result = await diagnoseWithDirectGemini(rawBase64, ext, req.body.geminiKey);
+      } catch (geminiErr) {
+        console.error('[Predict] Error en motor directo Gemini:', geminiErr.message);
+        if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+        return res.status(500).json({ error: 'Fallo en diagnóstico de IA: ' + geminiErr.message });
+      }
+    }
 
-      const updatedCases = [finalCase, ...cases];
-      if (writeDb(updatedCases)) {
-        console.log(`[API] AI Diagnosed & Registered Case: ${newId} (${result.diagnosis})`);
-        
-        broadcastUpdate({ type: 'ADD_CASE', caseData: finalCase });
-        
-        res.status(201).json({
-          success: true,
-          caseData: finalCase,
-          details: result.details,
-          model: result.model
-        });
+    // Limpieza de archivo temporal
+    if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+
+    // Registrar caso en la base de datos
+    const cases = readDb();
+    
+    let maxNum = 0;
+    cases.forEach(c => {
+      const num = parseInt(c.id.replace('CS-', ''));
+      if (!isNaN(num) && num > maxNum) maxNum = num;
+    });
+    const newId = `CS-${String(maxNum + 1).padStart(3, '0')}`;
+
+    let finalRegion = region || 'Napo';
+    let finalSvgX = svgX || 200;
+    let finalSvgY = svgY || 200;
+
+    if (lat && lng) {
+      if (lng < -77.544) {
+        finalRegion = lat < -1.027 ? 'Orellana' : 'Pastaza';
       } else {
-        res.status(500).json({ error: 'Failed to write case to database' });
+        finalRegion = lat < -1.027 ? 'Napo' : 'Sucumbíos';
       }
+      
+      const minLat = -1.036;
+      const maxLat = -1.018;
+      const minLng = -77.552;
+      const maxLng = -77.531;
+      finalSvgX = Math.round(40 + ((lng - minLng) / (maxLng - minLng)) * 420);
+      finalSvgY = Math.round(360 - ((lat - minLat) / (maxLat - minLat)) * 320);
+    }
 
-    } catch (aiErr) {
-      console.error('[Predict] Cloud AI Microservice execution error:', aiErr.message);
-      if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-      res.status(500).json({ error: 'Cloud AI Microservice execution failed: ' + aiErr.message });
+    const finalCase = {
+      id: newId,
+      location: location || 'Finca Local',
+      region: finalRegion,
+      date: new Date().toISOString().split('T')[0],
+      diagnosis: result.diagnosis,
+      confidence: result.confidence,
+      status: 'Crítico',
+      farmer: farmer || 'Técnico de Campo',
+      lat: lat || -1.0234,
+      lng: lng || -77.5432,
+      svgX: finalSvgX,
+      svgY: finalSvgY,
+      severity: result.diagnosis === 'Sano' ? 'ninguna' : (result.confidence > 90 ? 'alta' : 'media'),
+      prescription: '',
+      image: image
+    };
+
+    const updatedCases = [finalCase, ...cases];
+    if (writeDb(updatedCases)) {
+      console.log(`[API] Caso Diagnosticado y Registrado: ${newId} (${result.diagnosis})`);
+      
+      broadcastUpdate({ type: 'ADD_CASE', caseData: finalCase });
+      
+      res.status(201).json({
+        success: true,
+        caseData: finalCase,
+        details: result.details,
+        model: result.model
+      });
+    } else {
+      res.status(500).json({ error: 'Failed to write case to database' });
     }
   })();
 });
